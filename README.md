@@ -124,16 +124,12 @@ Configs:
 
 ## Optimizer Plan (Day One)
 
-Scheme: `hybrid_muon_adamw`
-
-Parameter-group policy:
-1. Muon for 2D hidden/projection matrices
-2. AdamW for embeddings, output head, biases, and 0D/1D parameters
+Scheme: `adamw`
 
 Why:
-- Muon can improve matrix optimization dynamics
-- AdamW is stable for non-matrix parameters
-- hybrid scheme keeps strong baseline behavior while testing Muon upside
+- Strong baseline stability for small-model laptop experiments.
+- Simpler debugging while we validate architecture and training loop behavior.
+- Muon is deferred until after SFT correctness is stable.
 
 ---
 
@@ -194,8 +190,10 @@ output_dir = "outputs/checkpoints/..."
 [data]
 train_jsonl = "data/processed/..."
 val_jsonl = "data/processed/..."
+test_jsonl = "data/processed/test.jsonl" # optional; used for test-on-best eval
 tokenization_mode = "hex_pair"
 track = "template_delta_operand_patch|strict_one_shot"
+target_mode = "patch_text|full_hex"
 
 [model]
 layers = 6
@@ -205,10 +203,11 @@ seq_len = 2048
 dropout = 0.0
 
 [optimizer]
-scheme = "hybrid_muon_adamw"
+scheme = "adamw"
 lr_adamw = 3e-4
-lr_muon = 1.5e-4
 weight_decay = 0.01
+betas = [0.9, 0.95]
+eps = 1e-8
 
 [init]
 mode = "scratch|warmstart|warmstart_textmix"
@@ -220,6 +219,21 @@ beta = 0.01
 rollout_samples = 32
 mode = "mainline|scratch_exploratory"
 init_ckpt = ""
+
+[train]
+batch_size = 16
+epochs = 20
+max_steps = 200
+log_interval = 2
+eval_interval = 20
+full_eval_every = 5
+save_interval = 20
+eval_max_samples = 64
+max_gen_tokens = 32
+grad_clip_norm = 1.0
+warmup_steps = 10
+min_lr_ratio = 0.1
+label_smoothing = 0.0
 ```
 
 ---
@@ -249,6 +263,10 @@ uv run train.py --config configs/rl_scratch_exploratory.toml
 uv run scripts/infer.py --input data/processed/test.jsonl --out outputs/predictions/test.jsonl
 uv run scripts/evaluate.py --ckpt outputs/checkpoints/rl_mainline --split test --out outputs/reports/test.json
 
+# 7) Evaluate learned SFT patch model
+uv run scripts/infer.py --mode sft_patch_model --weights outputs/checkpoints/sft_scratch/best_weights.safetensors --input data/processed/val.jsonl --out outputs/predictions/val_model.jsonl
+uv run scripts/evaluate.py --ckpt outputs/checkpoints/sft_scratch --split val --predictions outputs/predictions/val_model.jsonl --out outputs/reports/val_model_eval.json
+
 # Optional: one-command acceptance flow
 uv run scripts/run_acceptance.py
 ```
@@ -258,6 +276,11 @@ uv run scripts/run_acceptance.py
 ## Evaluation Metrics
 
 Primary:
+- `train_loss`
+- `val_loss`
+- `parse_success_rate`
+- `patch_exact_match_rate`
+- `operand_mae`
 - `macho_valid_rate`
 - `exec_success_rate`
 - `answer_accuracy`
@@ -270,6 +293,12 @@ Secondary:
 Generalization axes:
 - unseen prompt templates
 - held-out magnitude buckets
+- operand sign patterns (`++`, `+-`, `-+`, `--`)
+
+Slice reports:
+- template slices (`prompt_template`)
+- magnitude pair slices (`core/core`, `core/heldout`, `heldout/core`, `heldout/heldout`)
+- sign-pattern slices
 
 ---
 

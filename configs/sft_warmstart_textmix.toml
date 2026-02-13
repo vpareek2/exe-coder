@@ -7,8 +7,10 @@ output_dir = "outputs/checkpoints/sft_warmstart_textmix"
 [data]
 train_jsonl = "data/processed/train_sft.jsonl"
 val_jsonl = "data/processed/val.jsonl"
+test_jsonl = "data/processed/test.jsonl"
 tokenization_mode = "hex_pair"
 track = "template_delta_operand_patch"
+target_mode = "patch_text"
 
 [model]
 layers = 6
@@ -18,10 +20,11 @@ seq_len = 2048
 dropout = 0.0
 
 [optimizer]
-scheme = "hybrid_muon_adamw"
+scheme = "adamw"
 lr_adamw = 3e-4
-lr_muon = 1.5e-4
 weight_decay = 0.01
+betas = [0.9, 0.95]
+eps = 1e-8
 
 [init]
 mode = "warmstart_textmix"
@@ -33,3 +36,18 @@ beta = 0.01
 rollout_samples = 32
 mode = "mainline"
 init_ckpt = "outputs/checkpoints/sft_warmstart_textmix/checkpoint.json"
+
+[train]
+batch_size = 16
+epochs = 20
+max_steps = 200
+log_interval = 2
+eval_interval = 20
+full_eval_every = 5
+save_interval = 20
+eval_max_samples = 64
+max_gen_tokens = 32
+grad_clip_norm = 1.0
+warmup_steps = 10
+min_lr_ratio = 0.1
+label_smoothing = 0.0
