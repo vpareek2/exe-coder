@@ -1,0 +1,35 @@
+[run]
+phase = "sft"
+name = "sft_warmstart"
+seed = 1337
+output_dir = "outputs/checkpoints/sft_warmstart"
+
+[data]
+train_jsonl = "data/processed/train_sft.jsonl"
+val_jsonl = "data/processed/val.jsonl"
+tokenization_mode = "hex_pair"
+track = "template_delta_operand_patch"
+
+[model]
+layers = 6
+hidden_size = 512
+heads = 8
+seq_len = 2048
+dropout = 0.0
+
+[optimizer]
+scheme = "hybrid_muon_adamw"
+lr_adamw = 3e-4
+lr_muon = 1.5e-4
+weight_decay = 0.01
+
+[init]
+mode = "warmstart"
+warmstart_ckpt = "outputs/checkpoints/language_warmstart/checkpoint.json"
+textmix_ratio = 0.0
+
+[rl]
+beta = 0.01
+rollout_samples = 32
+mode = "mainline"
+init_ckpt = "outputs/checkpoints/sft_warmstart/checkpoint.json"

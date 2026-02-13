@@ -1,1 +1,9 @@
 ref/
+build/
+outputs/
+data/processed/
+data/raw/
+__pycache__/
+*.pyc
+.DS_Store
+.venv/

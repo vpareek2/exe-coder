@@ -1,0 +1,35 @@
+[run]
+phase = "rl"
+name = "rl_mainline"
+seed = 1337
+output_dir = "outputs/checkpoints/rl_mainline"
+
+[data]
+train_jsonl = "data/processed/train_sft.jsonl"
+val_jsonl = "data/processed/val.jsonl"
+tokenization_mode = "hex_pair"
+track = "template_delta_operand_patch"
+
+[model]
+layers = 6
+hidden_size = 512
+heads = 8
+seq_len = 2048
+dropout = 0.0
+
+[optimizer]
+scheme = "hybrid_muon_adamw"
+lr_adamw = 2e-4
+lr_muon = 1e-4
+weight_decay = 0.01
+
+[init]
+mode = "warmstart_textmix"
+warmstart_ckpt = "outputs/checkpoints/sft_warmstart_textmix/checkpoint.json"
+textmix_ratio = 0.2
+
+[rl]
+beta = 0.01
+rollout_samples = 32
+mode = "mainline"
+init_ckpt = "outputs/checkpoints/sft_warmstart_textmix/checkpoint.json"

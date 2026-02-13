@@ -1,0 +1,12 @@
+[project]
+name = "exe-coder"
+version = "0.1.0"
+description = "Research scaffold for NL-to-Mach-O executable generation experiments."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[dependency-groups]
+train = [
+  "mlx",
+]
