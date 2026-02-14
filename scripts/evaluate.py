@@ -14,7 +14,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.binary.pipeline import DEFAULT_BETA, compute_reward, verify_binary
-from src.eval_framework import magnitude_pair_bucket, pilot_bar_summary, sign_pattern
+from src.eval_framework import magnitude_pair_bucket, milestone_gate_summary, pilot_bar_summary, sign_pattern
 
 
 def parse_args() -> argparse.Namespace:
@@ -149,21 +149,31 @@ def _coerce_parse_ok(record: dict[str, Any]) -> int:
 
 def _load_latest_training_losses(ckpt: Path) -> dict[str, float | None]:
     if not ckpt.exists() or not ckpt.is_dir():
-        return {"train_loss": None, "val_loss": None}
+        return {
+            "train_loss": None,
+            "val_loss": None,
+            "train_loss_start": None,
+            "train_loss_end": None,
+        }
 
     train_log = ckpt / "train_log.jsonl"
     eval_log = ckpt / "eval_log.jsonl"
 
-    train_loss: float | None = None
+    train_loss_start: float | None = None
+    train_loss_end: float | None = None
     val_loss: float | None = None
 
     if train_log.exists():
         try:
             lines = [line for line in train_log.read_text(encoding="utf-8").splitlines() if line.strip()]
             if lines:
-                train_loss = float(json.loads(lines[-1]).get("loss"))
+                first = json.loads(lines[0]).get("loss")
+                last = json.loads(lines[-1]).get("loss")
+                train_loss_start = float(first) if first is not None else None
+                train_loss_end = float(last) if last is not None else None
         except Exception:
-            train_loss = None
+            train_loss_start = None
+            train_loss_end = None
 
     if eval_log.exists():
         try:
@@ -177,7 +187,12 @@ def _load_latest_training_losses(ckpt: Path) -> dict[str, float | None]:
         except Exception:
             val_loss = None
 
-    return {"train_loss": train_loss, "val_loss": val_loss}
+    return {
+        "train_loss": train_loss_end,
+        "val_loss": val_loss,
+        "train_loss_start": train_loss_start,
+        "train_loss_end": train_loss_end,
+    }
 
 
 def main() -> int:
@@ -310,6 +325,12 @@ def main() -> int:
     }
 
     learning_summary = pilot_bar_summary(metrics, slices)
+    milestone_gates = milestone_gate_summary(
+        metrics,
+        slices,
+        train_loss_start=metrics.get("train_loss_start"),
+        train_loss_end=metrics.get("train_loss_end"),
+    )
 
     report = {
         "ckpt": str(args.ckpt),
@@ -319,6 +340,7 @@ def main() -> int:
         "metrics": metrics,
         "slices": slices,
         "learning_summary": learning_summary,
+        "milestone_gates": milestone_gates,
         "reward": {
             "beta": args.beta,
             "min": min(reward_values),
@@ -340,6 +362,7 @@ def main() -> int:
                 "count": total,
                 "metrics": metrics,
                 "learning_summary": learning_summary,
+                "milestone_gates": milestone_gates,
             },
             indent=2,
         ),

@@ -1,0 +1,55 @@
+[run]
+phase = "sft"
+name = "sft_stage0_overfit"
+seed = 1337
+output_dir = "outputs/checkpoints/sft_stage0_overfit"
+
+[data]
+train_jsonl = "data/processed/stage0/train_sft.jsonl"
+val_jsonl = "data/processed/stage0/val.jsonl"
+test_jsonl = "data/processed/stage0/test.jsonl"
+tokenization_mode = "hex_pair"
+track = "template_delta_operand_patch"
+target_mode = "patch_text"
+decode_min_int = -200
+decode_max_int = 200
+
+[model]
+layers = 6
+hidden_size = 512
+heads = 8
+seq_len = 2048
+dropout = 0.0
+
+[optimizer]
+scheme = "adamw"
+lr_adamw = 3e-4
+weight_decay = 0.01
+betas = [0.9, 0.95]
+eps = 1e-8
+
+[init]
+mode = "scratch"
+warmstart_ckpt = ""
+textmix_ratio = 0.0
+
+[rl]
+beta = 0.01
+rollout_samples = 32
+mode = "mainline"
+init_ckpt = "outputs/checkpoints/sft_stage0_overfit/checkpoint.json"
+
+[train]
+batch_size = 32
+epochs = 20
+max_steps = 400
+log_interval = 5
+eval_interval = 25
+full_eval_every = 2
+save_interval = 50
+eval_max_samples = 128
+max_gen_tokens = 32
+grad_clip_norm = 1.0
+warmup_steps = 40
+min_lr_ratio = 0.1
+label_smoothing = 0.0

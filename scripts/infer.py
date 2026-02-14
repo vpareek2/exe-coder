@@ -12,7 +12,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.binary.pipeline import compile_addition_binary, encode_file_base64
-from src.eval_framework import parse_patch_text
+from src.eval_framework import INT64_MAX, INT64_MIN, parse_patch_text_with_bounds
 
 
 def parse_args() -> argparse.Namespace:
@@ -27,6 +27,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--weights", type=Path, default=None, help="Path to .safetensors/.npz weights (required for sft_patch_model)")
     parser.add_argument("--max-gen-tokens", type=int, default=0, help="Override max generated patch tokens; 0 uses checkpoint default")
+    parser.add_argument("--decode-min-int", type=int, default=None, help="Lower decode bound for operands (defaults to checkpoint or int64 min)")
+    parser.add_argument("--decode-max-int", type=int, default=None, help="Upper decode bound for operands (defaults to checkpoint or int64 max)")
     parser.add_argument("--binaries-dir", type=Path, default=Path("outputs/predictions/bin"))
     return parser.parse_args()
 
@@ -67,6 +69,13 @@ def _copy_metadata(row: dict[str, Any]) -> dict[str, Any]:
     return {k: row.get(k) for k in keep_keys if k in row}
 
 
+def _short_error(exc: Exception, *, max_len: int = 240) -> str:
+    text = str(exc).replace("\n", " ").strip()
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 3] + "..."
+
+
 def _resolve_weights_path(path: Path | None) -> Path:
     if path is None:
         raise ValueError("--weights is required for mode=sft_patch_model")
@@ -78,7 +87,7 @@ def _resolve_weights_path(path: Path | None) -> Path:
     return path
 
 
-def _load_model_cfg_from_weights(weights_path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+def _load_model_cfg_from_weights(weights_path: Path) -> tuple[dict[str, Any], dict[str, Any], dict[str, int]]:
     metrics_path = weights_path.parent / "metrics.json"
     if not metrics_path.exists():
         raise FileNotFoundError(f"metrics.json not found next to weights: {metrics_path}")
@@ -87,7 +96,11 @@ def _load_model_cfg_from_weights(weights_path: Path) -> tuple[dict[str, Any], di
     if not isinstance(model_cfg, dict):
         raise ValueError(f"Invalid model config in {metrics_path}")
     train_cfg = payload.get("train") if isinstance(payload.get("train"), dict) else {}
-    return model_cfg, train_cfg
+    decode_cfg_raw = payload.get("decode_bounds")
+    decode_cfg = decode_cfg_raw if isinstance(decode_cfg_raw, dict) else {}
+    decode_min = int(decode_cfg.get("min_int", INT64_MIN))
+    decode_max = int(decode_cfg.get("max_int", INT64_MAX))
+    return model_cfg, train_cfg, {"min_int": decode_min, "max_int": decode_max}
 
 
 def run_deterministic_baseline(args: argparse.Namespace, inputs: list[dict[str, Any]]) -> None:
@@ -135,7 +148,7 @@ def run_sft_patch_model(args: argparse.Namespace, inputs: list[dict[str, Any]]) 
     from train import ByteTokenizer, greedy_generate_patch, make_model
 
     weights_path = _resolve_weights_path(args.weights)
-    model_cfg, train_cfg = _load_model_cfg_from_weights(weights_path)
+    model_cfg, train_cfg, decode_cfg = _load_model_cfg_from_weights(weights_path)
 
     tokenizer = ByteTokenizer()
     model = make_model(tokenizer.vocab_size, model_cfg, mx, nn)
@@ -143,6 +156,10 @@ def run_sft_patch_model(args: argparse.Namespace, inputs: list[dict[str, Any]]) 
     model.eval()
 
     max_gen_tokens = int(args.max_gen_tokens) if args.max_gen_tokens > 0 else int(train_cfg.get("max_gen_tokens", 32))
+    decode_min_int = int(args.decode_min_int) if args.decode_min_int is not None else int(decode_cfg["min_int"])
+    decode_max_int = int(args.decode_max_int) if args.decode_max_int is not None else int(decode_cfg["max_int"])
+    if decode_min_int > decode_max_int:
+        raise ValueError("--decode-min-int must be <= --decode-max-int")
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.binaries_dir.mkdir(parents=True, exist_ok=True)
@@ -162,9 +179,16 @@ def run_sft_patch_model(args: argparse.Namespace, inputs: list[dict[str, Any]]) 
                 tokenizer,
                 max_seq_len=int(model_cfg["seq_len"]),
                 max_gen_tokens=max_gen_tokens,
+                constrained_decode=True,
+                decode_min_int=decode_min_int,
+                decode_max_int=decode_max_int,
                 mx=mx,
             )
-            parsed = parse_patch_text(pred_patch_text)
+            parsed = parse_patch_text_with_bounds(
+                pred_patch_text,
+                min_int=decode_min_int,
+                max_int=decode_max_int,
+            )
 
             pred: dict[str, Any] = {
                 "id": sample_id,
@@ -191,19 +215,31 @@ def run_sft_patch_model(args: argparse.Namespace, inputs: list[dict[str, Any]]) 
             else:
                 a_pred, b_pred = parsed
                 bin_path = args.binaries_dir / sample_id
-                compile_result = compile_addition_binary(a_pred, b_pred, bin_path)
-                pred.update(
-                    {
-                        "parse_ok": True,
-                        "a_pred": a_pred,
-                        "b_pred": b_pred,
-                        "parse_error": None,
-                        "binary_b64": encode_file_base64(bin_path),
-                        "binary_sha256": compile_result.binary_sha256,
-                        "toolchain": compile_result.toolchain,
-                        "compile_flags": compile_result.compile_flags,
-                    }
-                )
+                try:
+                    compile_result = compile_addition_binary(a_pred, b_pred, bin_path)
+                    pred.update(
+                        {
+                            "parse_ok": True,
+                            "a_pred": a_pred,
+                            "b_pred": b_pred,
+                            "parse_error": None,
+                            "binary_b64": encode_file_base64(bin_path),
+                            "binary_sha256": compile_result.binary_sha256,
+                            "toolchain": compile_result.toolchain,
+                            "compile_flags": compile_result.compile_flags,
+                        }
+                    )
+                except Exception as exc:
+                    pred.update(
+                        {
+                            "parse_ok": False,
+                            "a_pred": a_pred,
+                            "b_pred": b_pred,
+                            "parse_error": f"compile_failed: {_short_error(exc)}",
+                            "binary_b64": None,
+                            "binary_sha256": None,
+                        }
+                    )
 
             outfile.write(json.dumps(pred, ensure_ascii=True) + "\n")
 

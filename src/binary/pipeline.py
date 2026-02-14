@@ -20,6 +20,8 @@ DEFAULT_COMPILE_FLAGS = (
 )
 DEFAULT_TIMEOUT_SECONDS = 2.0
 DEFAULT_BETA = 0.01
+INT64_MIN = -(2**63)
+INT64_MAX = 2**63 - 1
 
 
 @dataclass(frozen=True)
@@ -87,6 +89,14 @@ def _render_addition_source(a: int, b: int) -> str:
     )
 
 
+def _validate_int64_operand(name: str, value: int) -> None:
+    if not (INT64_MIN <= int(value) <= INT64_MAX):
+        raise ValueError(
+            f"{name}={value} is outside signed 64-bit range "
+            f"[{INT64_MIN}, {INT64_MAX}]"
+        )
+
+
 def compile_addition_binary(
     a: int,
     b: int,
@@ -104,6 +114,8 @@ def compile_addition_binary(
     """
     out_file = Path(out_path)
     out_file.parent.mkdir(parents=True, exist_ok=True)
+    _validate_int64_operand("a", a)
+    _validate_int64_operand("b", b)
 
     with tempfile.TemporaryDirectory(prefix="exe_coder_compile_") as tmp_dir:
         temp_root = Path(tmp_dir)

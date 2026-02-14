@@ -1,0 +1,55 @@
+[run]
+phase = "sft"
+name = "sft_stage2_scale"
+seed = 1337
+output_dir = "outputs/checkpoints/sft_stage2_scale"
+
+[data]
+train_jsonl = "data/processed/stage2/train_sft.jsonl"
+val_jsonl = "data/processed/stage2/val.jsonl"
+test_jsonl = "data/processed/stage2/test.jsonl"
+tokenization_mode = "hex_pair"
+track = "template_delta_operand_patch"
+target_mode = "patch_text"
+decode_min_int = -5000
+decode_max_int = 5000
+
+[model]
+layers = 6
+hidden_size = 512
+heads = 8
+seq_len = 2048
+dropout = 0.0
+
+[optimizer]
+scheme = "adamw"
+lr_adamw = 3e-4
+weight_decay = 0.01
+betas = [0.9, 0.95]
+eps = 1e-8
+
+[init]
+mode = "scratch"
+warmstart_ckpt = ""
+textmix_ratio = 0.0
+
+[rl]
+beta = 0.01
+rollout_samples = 32
+mode = "mainline"
+init_ckpt = "outputs/checkpoints/sft_stage2_scale/checkpoint.json"
+
+[train]
+batch_size = 32
+epochs = 20
+max_steps = 6000
+log_interval = 20
+eval_interval = 150
+full_eval_every = 3
+save_interval = 300
+eval_max_samples = 512
+max_gen_tokens = 32
+grad_clip_norm = 1.0
+warmup_steps = 400
+min_lr_ratio = 0.1
+label_smoothing = 0.0

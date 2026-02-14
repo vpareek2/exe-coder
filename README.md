@@ -75,7 +75,7 @@ uv run train.py --config <toml>
 Canonical dataset runner:
 
 ```bash
-uv run generate.py --all --train-n <N> --val-n <N> --test-n <N>
+uv run generate.py --all --profile stage1 --out-dir data/processed/stage1 --binaries-dir outputs/bin/stage1
 ```
 
 Environment policy:
@@ -104,21 +104,23 @@ Rationale:
 
 ---
 
-## Initialization Ablations (Run in Parallel)
+## Current SFT Policy
 
-SFT runs three init arms:
-1. `scratch`
-2. `warmstart`
-3. `warmstart_textmix`
+Current default path is scratch-only staged training for Track A:
+1. `configs/sft_stage0_overfit.toml`
+2. `configs/sft_stage1_pilot.toml`
+3. `configs/sft_stage1a_template_shift.toml` (template shift isolated)
+4. `configs/sft_stage1b_magnitude_shift.toml` (magnitude shift isolated)
+5. `configs/sft_stage2_scale.toml`
 
-Purpose:
-- quantify value of language priors for NL -> binary mapping
-- measure whether mixed text objective helps retain language grounding
-
-Configs:
+Warmstart/textmix configs remain available for later ablations:
 - `configs/sft_scratch.toml`
 - `configs/sft_warmstart.toml`
 - `configs/sft_warmstart_textmix.toml`
+
+Run policy:
+- reach Stage 1 (`G1`) with scratch first
+- run warmstart/textmix matrix after scratch baseline is stable
 
 ---
 
@@ -130,6 +132,26 @@ Why:
 - Strong baseline stability for small-model laptop experiments.
 - Simpler debugging while we validate architecture and training loop behavior.
 - Muon is deferred until after SFT correctness is stable.
+
+---
+
+## Staged Track-A Regimen
+
+Stage profiles are built into `generate.py`:
+- `stage0`: overfit sanity (`train=512`, `val=128`, `test=128`, range `[-200, 200]`, train templates on all splits)
+- `stage1`: pilot generalization (`train=10000`, `val=1000`, `test=1000`, range `[-1000, 1000]`, held-out val/test templates)
+- `stage1a`: template shift only (`train templates for train`, held-out templates for val/test, no held-out magnitude sampling)
+- `stage1b`: magnitude shift only (`train templates for all splits`, held-out magnitude sampling on val/test)
+- `stage2`: scale-up (`train=50000`, `val=5000`, `test=5000`, range `[-5000, 5000]`, held-out val/test templates)
+
+Track-A decoding is constrained to `A=<int>;B=<int>\n` with per-config operand bounds (`data.decode_min_int`, `data.decode_max_int`).
+
+Milestone gates:
+- `G0` (loop sanity): train loss decreases + `parse_success_rate >= 0.95` + `answer_accuracy >= 0.90`
+- `G1` (pilot success): `answer_accuracy >= 0.50` + `exec_success_rate >= 0.70` + no catastrophic slice collapse
+- `G2` (RL-ready): `answer_accuracy >= 0.75` + `parse_success_rate >= 0.95` + `heldout/heldout answer_accuracy >= 0.55`
+
+Gate status is emitted in evaluation reports under `milestone_gates`.
 
 ---
 
@@ -159,10 +181,12 @@ RL configs:
 
 Stable components currently in use:
 - dataset runner: `generate.py`
+- staged pipeline runner: `scripts/run_track_a_stage.py`
 - compile: `scripts/compile_target.py`
 - verify: `scripts/verify_binary.py`
 - phase-A checks: `scripts/run_phase_a_checks.py`
 - dataset generation: `scripts/generate_dataset.py`
+- dataset quality checks: `scripts/check_dataset_quality.py`
 - SFT preparation: `scripts/prepare_sft_data.py`
 - inference baseline: `scripts/infer.py`
 - evaluation: `scripts/evaluate.py`
@@ -194,6 +218,8 @@ test_jsonl = "data/processed/test.jsonl" # optional; used for test-on-best eval
 tokenization_mode = "hex_pair"
 track = "template_delta_operand_patch|strict_one_shot"
 target_mode = "patch_text|full_hex"
+decode_min_int = -1000
+decode_max_int = 1000
 
 [model]
 layers = 6
@@ -244,31 +270,33 @@ label_smoothing = 0.0
 # 1) Determinism + golden correctness checks
 uv run scripts/run_phase_a_checks.py
 
-# 2) Build dataset splits
-uv run generate.py --all --train-n 10000 --val-n 1000 --test-n 1000
+# 2) Build Stage 0 dataset (train-style templates across train/val/test)
+uv run generate.py --all --profile stage0 --out-dir data/processed/stage0 --binaries-dir outputs/bin/stage0
 
-# 3) Prepare SFT sequences
-uv run scripts/prepare_sft_data.py --input data/processed/train.jsonl --out data/processed/train_sft.jsonl
+# 3) Prepare Stage 0 SFT sequences
+uv run scripts/prepare_sft_data.py --input data/processed/stage0/train.jsonl --out data/processed/stage0/train_sft.jsonl
 
-# 4) Run SFT ablations
-uv run train.py --config configs/sft_scratch.toml
-uv run train.py --config configs/sft_warmstart.toml
-uv run train.py --config configs/sft_warmstart_textmix.toml
+# 4) Dataset quality checks (sign coverage + slice availability)
+uv run scripts/check_dataset_quality.py --train data/processed/stage0/train.jsonl --val data/processed/stage0/val.jsonl --test data/processed/stage0/test.jsonl
 
-# 5) Run RL branches
-uv run train.py --config configs/rl_mainline.toml
-uv run train.py --config configs/rl_scratch_exploratory.toml
+# 5) Run staged scratch SFT
+uv run train.py --config configs/sft_stage0_overfit.toml
 
-# 6) Evaluate pipeline
-uv run scripts/infer.py --input data/processed/test.jsonl --out outputs/predictions/test.jsonl
-uv run scripts/evaluate.py --ckpt outputs/checkpoints/rl_mainline --split test --out outputs/reports/test.json
+# 6) Evaluate learned Stage 0 model on validation
+uv run scripts/infer.py --mode sft_patch_model --weights outputs/checkpoints/sft_stage0_overfit/best_weights.safetensors --input data/processed/stage0/val.jsonl --out outputs/predictions/stage0_val_model.jsonl
+uv run scripts/evaluate.py --ckpt outputs/checkpoints/sft_stage0_overfit --split val --predictions outputs/predictions/stage0_val_model.jsonl --out outputs/reports/stage0_val_model_eval.json
 
-# 7) Evaluate learned SFT patch model
-uv run scripts/infer.py --mode sft_patch_model --weights outputs/checkpoints/sft_scratch/best_weights.safetensors --input data/processed/val.jsonl --out outputs/predictions/val_model.jsonl
-uv run scripts/evaluate.py --ckpt outputs/checkpoints/sft_scratch --split val --predictions outputs/predictions/val_model.jsonl --out outputs/reports/val_model_eval.json
+# 7) Optional one-command stage runner (generate -> prepare -> train -> infer -> evaluate)
+uv run scripts/run_track_a_stage.py --stage stage0
 
-# Optional: one-command acceptance flow
-uv run scripts/run_acceptance.py
+# 8) Move to Stage 1/2 when the previous gate passes
+uv run scripts/run_track_a_stage.py --stage stage1
+uv run scripts/run_track_a_stage.py --stage stage1a
+uv run scripts/run_track_a_stage.py --stage stage1b
+uv run scripts/run_track_a_stage.py --stage stage2
+
+# Optional smoke acceptance run
+uv run scripts/run_acceptance.py --train-n 16 --val-n 8 --test-n 8
 ```
 
 ---
@@ -278,6 +306,8 @@ uv run scripts/run_acceptance.py
 Primary:
 - `train_loss`
 - `val_loss`
+- `train_loss_start`
+- `train_loss_end`
 - `parse_success_rate`
 - `patch_exact_match_rate`
 - `operand_mae`
@@ -299,6 +329,7 @@ Slice reports:
 - template slices (`prompt_template`)
 - magnitude pair slices (`core/core`, `core/heldout`, `heldout/core`, `heldout/heldout`)
 - sign-pattern slices
+- milestone gates (`g0_loop_sanity`, `g1_pilot_success`, `g2_rl_ready`)
 
 ---
 

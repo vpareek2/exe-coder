@@ -13,7 +13,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from src.eval_framework import is_better_checkpoint, parse_patch_text
+from src.eval_framework import (
+    INT64_MAX,
+    INT64_MIN,
+    is_better_checkpoint,
+    parse_patch_text_with_bounds,
+)
 
 try:
     import tomllib  # Python 3.11+
@@ -217,10 +222,17 @@ class SFTSettings:
     min_lr_ratio: float
     label_smoothing: float
     full_eval_every: int
+    decode_min_int: int
+    decode_max_int: int
 
 
 def parse_sft_settings(data: dict[str, Any], train: dict[str, Any]) -> SFTSettings:
     target_mode = str(data.get("target_mode", "patch_text"))
+    decode_min_int = int(data.get("decode_min_int", INT64_MIN))
+    decode_max_int = int(data.get("decode_max_int", INT64_MAX))
+    if decode_min_int > decode_max_int:
+        raise ConfigError("data.decode_min_int must be <= data.decode_max_int")
+
     return SFTSettings(
         target_mode=target_mode,
         batch_size=int(train.get("batch_size", 16)),
@@ -236,6 +248,8 @@ def parse_sft_settings(data: dict[str, Any], train: dict[str, Any]) -> SFTSettin
         min_lr_ratio=float(train.get("min_lr_ratio", 0.1)),
         label_smoothing=float(train.get("label_smoothing", 0.0)),
         full_eval_every=max(1, int(train.get("full_eval_every", 5))),
+        decode_min_int=decode_min_int,
+        decode_max_int=decode_max_int,
     )
 
 
@@ -449,6 +463,179 @@ def make_model(vocab_size: int, model_cfg: dict[str, Any], mx: Any, nn: Any) -> 
     return CausalPatchTransformer()
 
 
+def _int_from_sign_digits(sign: int, digits: str) -> int | None:
+    if not digits:
+        return None
+    magnitude = int(digits)
+    return magnitude if sign >= 0 else -magnitude
+
+
+def _allowed_next_digit_chars(
+    *,
+    sign: int,
+    digits: str,
+    min_int: int,
+    max_int: int,
+    max_digits: int,
+) -> list[str]:
+    if len(digits) >= max_digits:
+        return []
+
+    current = int(digits) if digits else 0
+    allowed: list[str] = []
+    for d in "0123456789":
+        candidate_mag = current * 10 + int(d)
+        candidate_val = candidate_mag if sign >= 0 else -candidate_mag
+        if min_int <= candidate_val <= max_int:
+            allowed.append(d)
+    return allowed
+
+
+def _patch_next_allowed_chars(
+    prefix: str,
+    *,
+    min_int: int,
+    max_int: int,
+    max_digits: int = 19,
+) -> list[str]:
+    state = "expect_A"
+    curr_sign = 1
+    curr_digits = ""
+
+    for ch in prefix:
+        if state == "expect_A":
+            if ch != "A":
+                return []
+            state = "expect_eq1"
+            continue
+
+        if state == "expect_eq1":
+            if ch != "=":
+                return []
+            state = "a_first"
+            continue
+
+        if state == "a_first":
+            if ch == "-" and min_int < 0:
+                curr_sign = -1
+                curr_digits = ""
+                state = "a_digits"
+                continue
+            if ch.isdigit():
+                curr_sign = 1
+                curr_digits = ch
+                state = "a_digits"
+                continue
+            return []
+
+        if state == "a_digits":
+            if ch.isdigit():
+                next_digits = curr_digits + ch
+                if len(next_digits) > max_digits:
+                    return []
+                val = _int_from_sign_digits(curr_sign, next_digits)
+                if val is None or not (min_int <= val <= max_int):
+                    return []
+                curr_digits = next_digits
+                continue
+            if ch == ";" and curr_digits:
+                state = "expect_B"
+                continue
+            return []
+
+        if state == "expect_B":
+            if ch != "B":
+                return []
+            state = "expect_eq2"
+            continue
+
+        if state == "expect_eq2":
+            if ch != "=":
+                return []
+            state = "b_first"
+            continue
+
+        if state == "b_first":
+            if ch == "-" and min_int < 0:
+                curr_sign = -1
+                curr_digits = ""
+                state = "b_digits"
+                continue
+            if ch.isdigit():
+                curr_sign = 1
+                curr_digits = ch
+                state = "b_digits"
+                continue
+            return []
+
+        if state == "b_digits":
+            if ch.isdigit():
+                next_digits = curr_digits + ch
+                if len(next_digits) > max_digits:
+                    return []
+                val = _int_from_sign_digits(curr_sign, next_digits)
+                if val is None or not (min_int <= val <= max_int):
+                    return []
+                curr_digits = next_digits
+                continue
+            if ch == "\n" and curr_digits:
+                state = "done"
+                continue
+            return []
+
+        if state == "done":
+            return []
+
+    if state == "expect_A":
+        return ["A"]
+    if state == "expect_eq1":
+        return ["="]
+    if state == "a_first":
+        opts = _allowed_next_digit_chars(sign=1, digits="", min_int=min_int, max_int=max_int, max_digits=max_digits)
+        if min_int < 0:
+            return ["-"] + opts
+        return opts
+    if state == "a_digits":
+        opts = _allowed_next_digit_chars(
+            sign=curr_sign,
+            digits=curr_digits,
+            min_int=min_int,
+            max_int=max_int,
+            max_digits=max_digits,
+        )
+        return opts + ([";"] if curr_digits else [])
+    if state == "expect_B":
+        return ["B"]
+    if state == "expect_eq2":
+        return ["="]
+    if state == "b_first":
+        opts = _allowed_next_digit_chars(sign=1, digits="", min_int=min_int, max_int=max_int, max_digits=max_digits)
+        if min_int < 0:
+            return ["-"] + opts
+        return opts
+    if state == "b_digits":
+        opts = _allowed_next_digit_chars(
+            sign=curr_sign,
+            digits=curr_digits,
+            min_int=min_int,
+            max_int=max_int,
+            max_digits=max_digits,
+        )
+        return opts + (["\n"] if curr_digits else [])
+    return []
+
+
+def _select_constrained_next_id(last_logits: Any, allowed_ids: list[int]) -> int:
+    best_id = allowed_ids[0]
+    best_score = float(last_logits[best_id].item())
+    for token_id in allowed_ids[1:]:
+        score = float(last_logits[token_id].item())
+        if score > best_score:
+            best_score = score
+            best_id = token_id
+    return best_id
+
+
 def greedy_generate_patch(
     model: Any,
     prompt: str,
@@ -456,6 +643,9 @@ def greedy_generate_patch(
     *,
     max_seq_len: int,
     max_gen_tokens: int,
+    constrained_decode: bool,
+    decode_min_int: int,
+    decode_max_int: int,
     mx: Any,
 ) -> str:
     prefix = format_prompt_prefix(prompt)
@@ -468,15 +658,28 @@ def greedy_generate_patch(
             break
 
         logits = model(mx.array([context], dtype=mx.int32))
-        next_id = int(mx.argmax(logits[0, -1]).item())
-
-        if next_id == tokenizer.eos_id:
-            break
-        if next_id == tokenizer.pad_id:
-            break
+        if constrained_decode:
+            generated_text = tokenizer.decode(generated)
+            allowed_chars = _patch_next_allowed_chars(
+                generated_text,
+                min_int=decode_min_int,
+                max_int=decode_max_int,
+            )
+            if not allowed_chars:
+                break
+            allowed_ids = [ord(ch) for ch in allowed_chars]
+            next_id = _select_constrained_next_id(logits[0, -1], allowed_ids)
+        else:
+            next_id = int(mx.argmax(logits[0, -1]).item())
+            if next_id == tokenizer.eos_id:
+                break
+            if next_id == tokenizer.pad_id:
+                break
 
         generated.append(next_id)
         context.append(next_id)
+        if constrained_decode and next_id == ord("\n"):
+            break
 
     return tokenizer.decode(generated)
 
@@ -545,9 +748,16 @@ def evaluate_model(
                 tokenizer,
                 max_seq_len=int(model_cfg["seq_len"]),
                 max_gen_tokens=settings.max_gen_tokens,
+                constrained_decode=True,
+                decode_min_int=settings.decode_min_int,
+                decode_max_int=settings.decode_max_int,
                 mx=mx,
             )
-            parsed = parse_patch_text(pred_text)
+            parsed = parse_patch_text_with_bounds(
+                pred_text,
+                min_int=settings.decode_min_int,
+                max_int=settings.decode_max_int,
+            )
 
             if parsed is None:
                 rewards.append(-1.0)
@@ -560,9 +770,13 @@ def evaluate_model(
             operand_mae_count += 1
 
             pred_bin = tmp_dir / f"pred_{idx:06d}"
-            compile_addition_binary(pred_a, pred_b, pred_bin)
-            verification = verify_binary(pred_bin, str(expected_stdout))
-            reward = compute_reward(verification, beta=beta)
+            try:
+                compile_addition_binary(pred_a, pred_b, pred_bin)
+                verification = verify_binary(pred_bin, str(expected_stdout))
+                reward = compute_reward(verification, beta=beta)
+            except Exception:
+                rewards.append(-1.0)
+                continue
 
             sum_valid += verification["metrics"]["macho_valid"]
             sum_exec += verification["metrics"]["exec_ok"]
@@ -716,7 +930,8 @@ def run_sft(
         "[train.py:sft] "
         f"train_rows={len(train_rows)} val_rows={len(val_rows)} "
         f"target_mode={settings.target_mode} batch_size={settings.batch_size} "
-        f"total_steps={total_steps} full_eval_every={settings.full_eval_every}"
+        f"total_steps={total_steps} full_eval_every={settings.full_eval_every} "
+        f"decode_bounds=[{settings.decode_min_int}, {settings.decode_max_int}]"
     )
 
     for epoch in range(1, settings.epochs + 1):
@@ -913,6 +1128,10 @@ def run_sft(
         "status": "trained",
         "track": data["track"],
         "target_mode": settings.target_mode,
+        "decode_bounds": {
+            "min_int": settings.decode_min_int,
+            "max_int": settings.decode_max_int,
+        },
         "init_mode": init_mode,
         "warmstart_loaded": warmstart_loaded,
         "mlx": mlx,
@@ -943,6 +1162,10 @@ def run_sft(
         "tokenization_mode": data["tokenization_mode"],
         "track": data["track"],
         "target_mode": settings.target_mode,
+        "decode_bounds": {
+            "min_int": settings.decode_min_int,
+            "max_int": settings.decode_max_int,
+        },
         "model": model_cfg,
         "optimizer": {
             "scheme": "adamw",

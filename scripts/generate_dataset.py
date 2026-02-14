@@ -52,6 +52,12 @@ SPLIT_SEED_OFFSET = {
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate deterministic NL->Mach-O dataset")
     parser.add_argument("--split", choices=["train", "val", "test"], required=True)
+    parser.add_argument(
+        "--template-set",
+        choices=["split_default", "train_only"],
+        default="split_default",
+        help="Template routing policy. split_default keeps train templates for train and held-out templates for val/test; train_only uses train templates for all splits.",
+    )
     parser.add_argument("--n", type=int, required=True, help="Number of examples")
     parser.add_argument("--out", type=Path, required=True, help="JSONL output path")
     parser.add_argument("--seed", type=int, default=1337)
@@ -73,7 +79,10 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _template_pool(split: str) -> list[str]:
+def _template_pool(split: str, template_set: str) -> list[str]:
+    if template_set == "train_only":
+        return TRAIN_TEMPLATES
+
     if split == "train":
         return TRAIN_TEMPLATES
     if split == "val":
@@ -116,7 +125,7 @@ def main() -> int:
         raise ValueError("--n must be positive")
 
     rng = random.Random(args.seed + SPLIT_SEED_OFFSET[args.split])
-    template_pool = _template_pool(args.split)
+    template_pool = _template_pool(args.split, args.template_set)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     split_bin_dir = args.binaries_dir / args.split
@@ -179,6 +188,7 @@ def main() -> int:
                 "out": str(args.out),
                 "binaries_dir": str(split_bin_dir),
                 "seed": args.seed,
+                "template_set": args.template_set,
                 "holdout_threshold": args.holdout_threshold,
                 "holdout_ratio": args.holdout_ratio,
             },
